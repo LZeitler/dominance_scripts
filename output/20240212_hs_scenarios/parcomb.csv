@@ -1,0 +1,7 @@
+,N,h_shape
+1000,100,const
+1001,100,unif
+1002,100,inverse
+1003,1000,const
+1004,1000,unif
+1005,1000,inverse
