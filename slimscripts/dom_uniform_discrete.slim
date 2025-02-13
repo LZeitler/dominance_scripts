@@ -1,0 +1,39 @@
+// Keywords: dominance coefficients, mutation(), fitness()
+
+initialize() {
+	
+	initializeSLiMOptions(preventIncidentalSelfing=T);
+	
+	if (exists("slimgui")) {
+		defineConstant("N",20);
+		defineConstant("pcomb",9999);
+		defineConstant("rep",999);
+	}
+	
+	initializeMutationRate(1e-7);
+	sbins=seq(-1,-0.0001,length=11); // selection coeff. approx. uniform dist.
+	c=1;                             // mutation type counter
+	for (s in seqAlong(sbins)) {     // iterate through discrete s bins
+		for (i in 0:10) {             // discrete dominance coeff. 
+			initializeMutationType(c, i * 0.1 / 2, "f", sbins[s]); // Max. d is 0.5 so we have to divide by 2.
+			c=c+1;		
+		}
+	}
+	c=c-1;
+	initializeGenomicElementType("g1", 1:c, rep(1/c,c));
+	initializeGenomicElement(g1, 0, 1e7-1);
+	initializeRecombinationRate(1e-6);
+}
+
+1 {
+	sim.addSubpop("p1", N);
+}
+
+100000 late() {
+	sim.outputFixedMutations(pcomb+"_rep"+rep+"_dom_discrete.fixed");
+	num=min(c(length(sim.subpopulations[0].genomes),100));
+	g=sim.subpopulations[0].genomes[0:(num-1)];
+	g.outputVCF(filePath=pcomb+"_rep"+rep+'_dom_discrete.vcf', outputMultiallelics=F);
+	sim.outputFull(filePath=pcomb+"_rep"+rep+'_dom_discrete.slimout');
+}
+

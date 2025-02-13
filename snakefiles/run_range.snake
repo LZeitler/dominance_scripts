@@ -1,0 +1,201 @@
+import numpy as np
+import pandas as pd
+from itertools import product
+from datetime import datetime
+import os
+import subprocess
+
+
+def expand_grid(data_dict):
+    rows = product(*data_dict.values())
+    return pd.DataFrame.from_records(rows, columns=data_dict.keys())
+
+# workdir
+# workdir: config['workpath']
+
+# set up replicates, sims and burnin
+reps = 20
+breps = 20
+
+# set up parameters
+allparams = {
+    "Na": [10000],
+    "Ns": [200],
+}
+
+nreps = np.arange(reps)
+dparams = expand_grid(allparams)
+dparams.index = range(2000,len(dparams) + 2000)
+
+# relevant parameters for burnin
+dparamsB = dparams[["Na"]]
+bpar = dparamsB.drop_duplicates().reset_index(drop=True)
+
+# write parameter space table
+if not os.path.isfile("parcomb_range.csv"):
+    pd.DataFrame.to_csv(dparams,"parcomb_range.csv",index=True)
+
+# burnvcf = []
+# for r in dparamsB.index:
+#     for n in range(breps):
+#         s = ""
+#         for c in bpar.columns:
+#             s += "_" + str(c) + str(dparamsB.loc[r,c])
+#         burnvcf.append(str(n) + s + ".slimout")
+
+# burnfind = pd.DataFrame({'vcfname':burnvcf,"parcomb":np.repeat(dparamsB.index,breps)})
+# burnvcf = pd.unique(burnvcf)
+
+# output = '36_hdel0.3_hben0.3_mdel-0.0001_mben0.0_nneutral0.499_ndel0.5_nben0.01_Na5000_rCoeff1.2.slimout'
+
+stages = ["t1_A","t1_B","t3_A","t3_B","t3_C","t3_Z","t4_C","t4_Z"]
+
+###################
+# snakemake rules #
+###################
+
+# wildcard_constraints:
+#     burnin = '|'.join([re.escape(x) for x in burnvcf])
+
+rule all:
+    input:
+        "fitness-stats_summary.txt",
+        "hs-range_summary.txt"
+
+rule prepBurn:
+    input:
+        "1001_rep{nrep}_dom_discrete.slimout"
+    output:
+        "1001_rep{nrep}_dom_discrete.ages.slimout"
+    threads:
+        1
+    log:
+        "logs/snake/prepBurn_rep{nrep}.log"
+    resources:
+        mem_mb = 500,
+        time = 2
+    shell:
+        """
+        awk '/^p1:.+/{{print $0" 0"; next}} 1' {input} | awk '/Version: 3/{{print "Version: 4"; next}} 1' > {output}
+        """
+
+rule sim:
+    input:
+        parameters = "parcomb_range.csv",
+        burnin = "1001_rep{nrep}_dom_discrete.ages.slimout"
+        # f = expand("{burnin}", burnin=burnvcf),
+    output:
+        "t1_A_rep{nrep}_par{dparam}.vcf",
+        "t1_B_rep{nrep}_par{dparam}.vcf",
+        "t3_A_rep{nrep}_par{dparam}.vcf",
+        "t3_B_rep{nrep}_par{dparam}.vcf",
+        "t3_C_rep{nrep}_par{dparam}.vcf",
+        "t3_Z_rep{nrep}_par{dparam}.vcf",
+        "t4_C_rep{nrep}_par{dparam}.vcf",
+        "t4_Z_rep{nrep}_par{dparam}.vcf",
+        "fitness-stats_rep{nrep}_par{dparam}.txt",
+    params:
+        slim = config["slimpath"],
+        slimscript = config["slimscriptRange"]
+    threads:
+        1
+    log:
+        "logs/snake/sim_rep{nrep}_par{dparam}.log"
+    resources:
+        mem_mb = lambda wildcards, attempt: attempt * 16384,
+        time = lambda wildcards, attempt: attempt * 60 * 96
+    run:
+        # determine burn in file, random sample from correct par comb
+        # bfile = "\\\"" + burnfind[burnfind.parcomb == int(wildcards.dparam)].sample(1).vcfname.values[0] + "\\\""
+
+        # construct submit string
+        d = dparams[dparams.index == int(wildcards.dparam)]
+        vals = [d.iloc[0,i] for i in range(d.shape[1])]
+        rowl = dparams.columns.tolist()
+        pars = [str(i) + "=" + str(j) for i,j in zip(rowl, vals)]
+        pars = " -d ".join(pars)
+        pars = "-d " + pars + " -d parcomb=" + str(d.index[0]) + ' -d bfile=\\\"' + input.burnin + '\\\" -d rep=' + str(wildcards.nrep)
+
+        subprocess.Popen(params.slim + " " + pars + " " + params.slimscript, shell=True).wait()
+
+rule summarize_special:
+    input:
+        load =   expand("fitness-stats_rep{nrep}_par{dparam}.txt", nrep=nreps, dparam=dparams.index),
+    output:
+        load =  "fitness-stats_summary.txt",
+    params:
+        files_load = lambda wildcards, input: " ".join(input.load),
+    threads:
+        1
+    resources:
+        mem_mb = lambda wildcards, attempt: attempt * 2048,
+        time = lambda wildcards, attempt: attempt * 20
+    log:
+        "logs/snake/summarize_special_all.log"
+    shell:
+        """
+        awk '{{print $0"\t"FILENAME}}' {params.files_load} > {output.load} 2> {log}
+        """
+
+
+rule hscoeffs:
+    input:
+        "t1_A_rep{nrep}_par{dparam}.vcf",  # 0
+        "t1_B_rep{nrep}_par{dparam}.vcf",  # 1
+        "t3_A_rep{nrep}_par{dparam}.vcf",  # 2
+        "t3_B_rep{nrep}_par{dparam}.vcf",  # 3
+        "t3_C_rep{nrep}_par{dparam}.vcf",  # 4
+        "t3_Z_rep{nrep}_par{dparam}.vcf",  # 5
+        "t4_C_rep{nrep}_par{dparam}.vcf",  # 6
+        "t4_Z_rep{nrep}_par{dparam}.vcf"   # 7
+    output:
+        "t1_A_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 0
+        "t1_B_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 1
+        "t3_A_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 2
+        "t3_B_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 3
+        "t3_C_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 4
+        "t3_Z_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 5
+        "t4_C_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 6
+        "t4_Z_rep{nrep}_par{dparam}.vcf.hscoeffs"   # 7
+    threads:
+        1
+    resources:
+        mem_mb = lambda wildcards, attempt: attempt * 512,
+        time = lambda wildcards, attempt: attempt * 5
+    log:
+        "hscoefflog_{dparam}_rep{nrep}.log"
+    shell:
+        """
+        bcftools query -f '%MID\t%AC\t%S\t%DOM\t%GO\n' {input[0]} > {output[0]} 2> {log}
+        bcftools query -f '%MID\t%AC\t%S\t%DOM\t%GO\n' {input[1]} > {output[1]} 2>> {log}
+        bcftools query -f '%MID\t%AC\t%S\t%DOM\t%GO\n' {input[2]} > {output[2]} 2>> {log}
+        bcftools query -f '%MID\t%AC\t%S\t%DOM\t%GO\n' {input[3]} > {output[3]} 2>> {log}
+        bcftools query -f '%MID\t%AC\t%S\t%DOM\t%GO\n' {input[4]} > {output[4]} 2>> {log}
+        bcftools query -f '%MID\t%AC\t%S\t%DOM\t%GO\n' {input[5]} > {output[5]} 2>> {log}
+        bcftools query -f '%MID\t%AC\t%S\t%DOM\t%GO\n' {input[6]} > {output[6]} 2>> {log}
+        bcftools query -f '%MID\t%AC\t%S\t%DOM\t%GO\n' {input[7]} > {output[7]} 2>> {log}
+        """
+
+rule summarize:
+    input:
+        expand("{stage}_rep{nrep}_par{dparam}.vcf.hscoeffs",nrep=nreps,dparam=dparams.index,stage=stages),  # 0
+        # "t1_B_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 1
+        # "t3_A_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 2
+        # "t3_B_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 3
+        # "t3_C_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 4
+        # "t3_Z_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 5
+        # "t4_C_rep{nrep}_par{dparam}.vcf.hscoeffs",  # 6
+        # "t4_Z_rep{nrep}_par{dparam}.vcf.hscoeffs"   # 7
+    output:
+        "hs-range_summary.txt"
+    threads:
+        1
+    resources:
+        mem_mb = lambda wildcards, attempt: attempt * 1024,
+        time = lambda wildcards, attempt: attempt * 5
+    log:
+        "summarizelog.log"
+    shell:
+        """
+        awk '{{print $0"\t"FILENAME}}' {input} > {output} 2> {log}
+        """

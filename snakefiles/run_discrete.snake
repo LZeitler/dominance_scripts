@@ -1,0 +1,140 @@
+import numpy as np
+import pandas as pd
+from itertools import product
+from datetime import datetime
+import os
+import subprocess
+
+
+def expand_grid(data_dict):
+    rows = product(*data_dict.values())
+    return pd.DataFrame.from_records(rows, columns=data_dict.keys())
+
+# workdir
+# workdir: config['workpath']
+
+# set up replicates
+reps = 20
+
+# set up parameters
+allparams = {
+    "N": [100,10000,20]
+}
+
+nreps = np.arange(reps)
+dparams = expand_grid(allparams)
+
+dparams.index = range(1000,len(dparams) + 1000)        # index, the last step
+
+# write parameter space table
+if not os.path.isfile("parcomb_discrete.csv"):
+    pd.DataFrame.to_csv(dparams,"parcomb_discrete.csv",index=True)
+
+###################
+# snakemake rules #
+###################
+
+rule all:
+    input:
+        "summary_dom_discrete.hs_segr.txt",
+        "summary_dom_discrete.hs_fixed.txt"
+
+#        expand("{dparam}_rep{nrep}_dom.vcf", nrep=nreps, dparam=dparams.index),
+
+rule sim:
+    # input:
+    #     parameters = "parcomb_discrete.csv"
+    output:
+        "{dparam}_rep{nrep}_dom_discrete.vcf",
+        "{dparam}_rep{nrep}_dom_discrete.fixed",
+        "{dparam}_rep{nrep}_dom_discrete.slimout",
+    params:
+        slim = config["slimpath"],
+        slimscript = config["slimscriptDiscrete"]
+    threads:
+        1
+    resources:
+        mem_mb = lambda wildcards, attempt: attempt * 4096,
+        time = lambda wildcards, attempt: attempt * 60 * 48
+    log:
+        "simlog_{dparam}_rep{nrep}.log"
+    run:
+        d = dparams[dparams.index == int(wildcards.dparam)]
+        vals = [d.iloc[0,i] for i in range(d.shape[1])]
+        rowl = dparams.columns.tolist()
+        pars = [str(i) + "=" + str(j) for i,j in zip(rowl, vals)]
+        pars = " -d ".join(pars)
+        pars = "-d " + pars + " -d pcomb=" + str(d.index[0]) + " -d rep=" + str(wildcards.nrep)
+
+        subprocess.Popen(params.slim + " " + pars + " " + params.slimscript, shell=True).wait()
+
+rule scoeffs:
+    input:
+        "{dparam}_rep{nrep}_dom_discrete.vcf"
+    output:
+        "{dparam}_rep{nrep}_dom_discrete.scoeffs",
+        "{dparam}_rep{nrep}_dom_discrete.hcoeffs"
+    threads:
+        1
+    resources:
+        mem_mb = lambda wildcards, attempt: attempt * 512,
+        time = lambda wildcards, attempt: attempt * 5
+    log:
+        "scoefflog_{dparam}_rep{nrep}.log"
+    shell:
+        """
+        bcftools query -f '%MID\t%AC\t%S\n' {input} > {output[0]} 2> {log}
+        bcftools query -f '%MID\t%DOM\n' {input} > {output[1]} 2> {log}
+        """
+
+rule hsrels:
+    input:
+        "{dparam}_rep{nrep}_dom_discrete.scoeffs",
+        "{dparam}_rep{nrep}_dom_discrete.hcoeffs",
+        "{dparam}_rep{nrep}_dom_discrete.fixed"
+    output:
+        "{dparam}_rep{nrep}_dom_discrete.hs_segr.txt",
+        "{dparam}_rep{nrep}_dom_discrete.hs_fixed.txt"
+    threads:
+        1
+    resources:
+        mem_mb = lambda wildcards, attempt: attempt * 1024,
+        time = lambda wildcards, attempt: attempt * 5
+    log:
+        "hsrelslog_{dparam}_rep{nrep}.log"
+    run:
+        # merge segregating
+        dfs = pd.read_csv(input[0], sep='\t', header=None, names=['id', 'af', 's']) #scoeffs
+        dfh = pd.read_csv(input[1], sep='\t', header=None, names=['id', 'h']) #hcoeffs
+
+        result_df = pd.merge(dfs, dfh, on='id', how='inner')
+
+        result_df.to_csv(output[0], sep='\t', index=False) #hs_segr.txt
+
+        # merge fixed
+        dff = pd.read_csv(input[2], sep=' ', skiprows=2, header=None, names=['no', 'id', 'type', 'pos', 's', 'na', 'pop','genorig','genfix']) #fixed
+
+        result_df = pd.merge(dff, dfh, on='id', how='inner')
+
+        result_df.to_csv(output[1], sep='\t', index=False) #hs_fixed.txt
+
+rule summarize:
+    input:
+        segr = expand("{dparam}_rep{nrep}_dom_discrete.hs_segr.txt", nrep=nreps, dparam=dparams.index),
+        fixed = expand("{dparam}_rep{nrep}_dom_discrete.hs_fixed.txt", nrep=nreps, dparam=dparams.index)
+    output:
+        "summary_dom_discrete.hs_segr.txt",
+        "summary_dom_discrete.hs_fixed.txt"
+    threads:
+        1
+    resources:
+        mem_mb = lambda wildcards, attempt: attempt * 1024,
+        time = lambda wildcards, attempt: attempt * 5
+    log:
+        "summarizelog.log"
+    shell:
+        """
+        awk '{{print $0"\t"FILENAME}}' {input.segr} > {output[0]} 2> {log}
+        awk '{{print $0"\t"FILENAME}}' {input.fixed} > {output[1]} 2>> {log}
+
+        """
